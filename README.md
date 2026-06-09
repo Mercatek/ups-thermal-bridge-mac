@@ -13,6 +13,20 @@ queue (most Zebra/Bixolon/Eltron‑style printers).
 
 ---
 
+## Does this solve your problem?
+
+This is for you if, on a **Mac**, you've run into any of these:
+
+- Clicking **"Print Thermal Label"** on **ups.com** does nothing, or opens an empty/blank window.
+- The official **UPS Thermal Printing** app is **Windows-only**, or the old Mac/Java version won't run on modern macOS / **Apple Silicon**.
+- You need to print **UPS ZPL labels** to a **Bixolon, Zebra or Eltron** thermal printer straight from the browser.
+- UPS expects a local helper on **`127.0.0.1:4349`** that doesn't exist on your Mac.
+- **QZ Tray** / WebSocket printing keeps getting blocked by Chrome (Private Network Access).
+
+> Search terms: *UPS thermal label macOS*, *print UPS ZPL label on Mac*, *UPS Thermal Printing app Mac alternative*, *UPS print thermal label not working Mac*, *UPS 127.0.0.1:4349 Mac*, *Bixolon/Zebra UPS label Chrome Mac*.
+
+---
+
 ## The problem
 
 When you click **Print Thermal Label** on ups.com, the browser tries to reach a
