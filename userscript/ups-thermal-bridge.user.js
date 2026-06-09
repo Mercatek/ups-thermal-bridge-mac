@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         UPS Thermal Label → Local Printer (ZPL bridge)
-// @namespace    https://github.com/YOUR_GITHUB/ups-thermal-bridge-mac
+// @namespace    https://github.com/Mercatek/ups-thermal-bridge-mac
 // @version      3.5
 // @description  Grabs the ZPL of the UPS label you are viewing (via UPS's own LabelRecovery API) and prints it on your local thermal printer through the companion local service (port 4349). Lets you print UPS thermal labels on macOS without the official Windows-only app.
 // @author       ups-thermal-bridge-mac

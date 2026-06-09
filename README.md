@@ -89,7 +89,7 @@ printf '^XA^FO50,50^ADN,36,20^FDtest^FS^XZ' | lp -d YOUR_PRINTER_NAME
 ### 2. Install the local service
 
 ```bash
-git clone https://github.com/YOUR_GITHUB/ups-thermal-bridge-mac.git
+git clone https://github.com/Mercatek/ups-thermal-bridge-mac.git
 cd ups-thermal-bridge-mac
 ./install.sh "YOUR_PRINTER_NAME"      # omit the name to use Bixolon_SRP770III
 ```
