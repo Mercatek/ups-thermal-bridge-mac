@@ -51,6 +51,8 @@ PRINTER = os.environ.get("UPS_BRIDGE_PRINTER", "Bixolon_SRP770III")
 PORT = int(os.environ.get("UPS_BRIDGE_PORT", "4349"))
 HOST = os.environ.get("UPS_BRIDGE_HOST", "127.0.0.1")
 USE_RAW = os.environ.get("UPS_BRIDGE_RAW", "0") == "1"
+# Format code advertised to ups.com in the native handshake (zpl=Zebra-class).
+LABELTYPE = os.environ.get("UPS_BRIDGE_LABELTYPE", "zpl")
 LOG_PATH = os.environ.get(
     "UPS_BRIDGE_LOG", os.path.expanduser("~/Library/Logs/ups-print-bridge.log")
 )
@@ -226,6 +228,64 @@ def instrument_html():
     return INSTRUMENT_HTML.replace("%PRINTER%", json.dumps(PRINTER))
 
 
+# Native-handshake page: reproduces the official app's labelWindow protocol
+# (reverse-engineered, see research/PROTOCOL.md). It asks ups.com for the label
+# via postMessage; ups.com posts the base64 label back; we POST it to /print.
+# This is what can make the Shipping-History flow work without the userscript.
+HANDSHAKE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>UPS Print Bridge</title></head>
+<body style="font:14px -apple-system,Arial;padding:18px">
+<h3>UPS Print Bridge</h3>
+<p id="s">Requesting the label from UPS&hellip;</p>
+<script>
+var PRINTER=%PRINTER%, LABELTYPE=%LABELTYPE%, PORT=%PORT%;
+var q=new URLSearchParams(location.search);
+var app=q.get('app')||''; var windowName=q.get('name')||window.name||'labelWindow';
+var origin='*'; try{ if(app && app.slice(0,4)==='http'){ origin=new URL(app).origin; } }catch(e){}
+function setS(t){var e=document.getElementById('s'); if(e) e.textContent=t;}
+function probe(o){try{fetch('/probe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)});}catch(e){}}
+probe({event:'handshake_loaded',app:app,windowName:windowName,origin:origin,hasOpener:!!window.opener});
+function requestLabel(){
+  var msg={requestType:'request',labelType:LABELTYPE,printer:PRINTER,windowName:windowName,version:'3.0.0'};
+  try{ if(window.opener){ window.opener.postMessage(msg,origin); window.opener.postMessage(msg,'*'); } }catch(e){}
+  try{ if(window.parent && window.parent!==window){ window.parent.postMessage(msg,'*'); } }catch(e){}
+}
+function looksLikeLabel(s){
+  if(typeof s!=='string'||s.length<100) return false;
+  if(s.indexOf('^XA')!==-1) return true;
+  try{ return atob(s.replace(/[^A-Za-z0-9+/=]/g,'')).indexOf('^XA')!==-1; }catch(e){ return false; }
+}
+var printed=false;
+function gotLabel(data){
+  if(printed) return; printed=true; setS('Printing on '+PRINTER+'…');
+  probe({event:'label_received',len:(data||'').length});
+  var body='printerName='+encodeURIComponent(PRINTER)+'&labelBytes='+encodeURIComponent(data);
+  var x=new XMLHttpRequest();
+  x.onreadystatechange=function(){ if(this.readyState===4){ setS('Sent to the printer.');
+    try{ if(window.opener) window.opener.postMessage({requestType:'response',query:this.response},origin);}catch(e){}
+    setTimeout(function(){try{window.close();}catch(e){}},1500); } };
+  x.open('POST','http://127.0.0.1:'+PORT+'/print',true);
+  x.setRequestHeader('Content-type','application/x-www-form-urlencoded');
+  x.send(body);
+}
+window.addEventListener('message',function(e){
+  var d=e.data, cand=null;
+  if(typeof d==='string') cand=d;
+  else if(d && typeof d==='object') cand=d.labelBytes||d.data||d.label||d.content||d.zpl;
+  if(looksLikeLabel(cand)){ probe({event:'msg_label',origin:e.origin}); gotLabel(cand); }
+});
+requestLabel(); setTimeout(requestLabel,400); setTimeout(requestLabel,1200);
+setTimeout(function(){ if(!printed){ setS('No label received from UPS in this window.'); } },9000);
+</script></body></html>"""
+
+
+def handshake_html():
+    return (HANDSHAKE_HTML
+            .replace("%PRINTER%", json.dumps(PRINTER))
+            .replace("%LABELTYPE%", json.dumps(LABELTYPE))
+            .replace("%PORT%", str(PORT)))
+
+
 def print_done_html(ok, detail=""):
     color = "#2D7A4F" if ok else "#C53030"
     msg = "Label sent to the printer" if ok else "Could not print: " + detail
@@ -342,7 +402,10 @@ class Handler(BaseHTTPRequestHandler):
                         return
                 if data:
                     log("    (label window but staged ZPL is stale %.0fs -> not printing)" % age)
-                self._send_html(instrument_html())
+                # Nothing staged -> attempt the native handshake (works without
+                # the userscript, incl. the Shipping-History flow). See PROTOCOL.md.
+                log("    (no staged ZPL -> serving native handshake page)")
+                self._send_html(handshake_html())
             else:
                 self._send_json(list_printers_payload(query))
         else:
