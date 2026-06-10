@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+    <script>
+        function requestPcl() '{
+            var pclType = document.getElementById("thermalPrinterType").value;
+            var printer = document.getElementById("thermalPrinterName").value;
+            if (pclType) {
+                 var message = {};
+                 message.requestType = "request";
+                 message.labelType = pclType;
+                 message.printer = printer;
+                 message.windowName = window.name;
+                 message.version = "3.0.0";
+                 window.opener.postMessage(message, "'{8}'");
+            }
+        '}
+        function waitForButtonClick() '{
+            var message = {};
+            message.requestType = "wait";
+            window.opener.postMessage(message, "'{8}'");
+        '}
+        function selectPrinter() '{
+            var selectedPrinter = document.getElementById("thermalPrinters");
+            var printerType = selectedPrinter.value;
+            var printerName = selectedPrinter.options[selectedPrinter.selectedIndex].innerHTML;
+            document.getElementById("thermalPrinterType").value=printerType;
+            document.getElementById("thermalPrinterName").value=printerName;
+            console.log("thermalPrinterName selected: "+ printerName);
+            requestPcl();
+        '}
+        function receiveMessage(event) '{
+            var printRequest = new XMLHttpRequest();
+            var printerName = document.getElementById("thermalPrinterName").value;
+            console.log("thermalPrinterName requested: "+ printerName);
+            var query = "printerName="+ printerName +"&labelBytes="+ event.data;
+            printRequest.onreadystatechange = function () {
+                if (this.readyState === 4) {
+                    var message = {};
+                    message.requestType = "response";
+                    message.query = this.response;
+                    window.opener.postMessage(message, "'{8}'");
+                }
+            }
+            printRequest.open("POST", "http://127.0.0.1:'{1}'/print", true);
+            printRequest.responseType = "text";
+            printRequest.setRequestHeader("Access-Control-Allow-Origin", "http://127.0.0.1:'{1}'"); 
+            printRequest.setRequestHeader("Content-type", "application/x-www-form-urlencoded"); 
+            printRequest.send(query);
+        '}
+    </script>
+    <title>{7}</title>
+</head>
+<body>
+  <div style="font-family:Arial, sans-serif; font-weight:bold; font-size:11px">
+    {2}<br/><br/>
+    {3} {4}<ul>
+    <li>{5}</li>
+    <li>{6}</li>
+    </ul>
+    <div id="thermalPrintersDiv">
+    <p align="right"><a href="javascript:window.close()"><b>{11}</b></a></p>{0}
+    </div>
+  <div id="footerDiv" style="text-align:center; position:fixed; bottom:2%">
+{10}
+  </div>
+  </div>
+    <script>
+         window.addEventListener("message", receiveMessage, false);
+         {9};
+    </script>
+</body>
+</html>

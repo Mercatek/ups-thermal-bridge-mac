@@ -49,4 +49,54 @@ userscript.
    history flow).
 5. Conclusions for a macOS re-implementation.
 
-_(Findings are appended below as the analysis proceeds.)_
+## What I actually did (and the shortcut that worked)
+
+Defeating InstallShield's compressed/encrypted `ISSetupStream` on macOS with
+only Python proved unnecessary: the **macOS build** is distributed as a plain
+ZIP — `UPS_Thermal_Printing-3.0.0.zip` (link found inside UPS's own Mac guide
+PDF, extracted from a FlateDecode stream). It contains
+`UPS Thermal Printing-3.0.0.dmg` (a 2018 Java app), which mounts read-only and
+is trivial to inspect:
+
+- `UPS Thermal Printing.app/Contents/Java/ThermalApp_Test.jar` — the app
+- `…/UPS Thermal Printing.cfg` — main class `com.ups.iss.printers.ThermalPrintController`
+- `…/PlugIns/Java.runtime/…/jre` — a bundled **JRE 8 (x86)**
+
+`www.ups.com` blocks non-browser clients (Akamai, `curl` → connection reset), so
+the ZIP was fetched through the logged-in Chrome browser; `assets.ups.com` (CDN)
+serves the `.exe` to `curl` fine.
+
+The Java classes were decompiled by parsing their constant pools in Python.
+The full protocol is written up in **[PROTOCOL.md](PROTOCOL.md)**; the verbatim
+label-window page is saved as **`labelwindow_template.html`**.
+
+## Conclusions for macOS
+
+1. **The official macOS app is a dead end on modern macOS.** It's a 2018 Java/
+   applet app with a bundled x86 JRE 8, unsigned, NPAPI-dependent. It will not
+   run on Apple Silicon / current macOS. (This is why a re-implementation is
+   needed at all.)
+
+2. **The `:4349` protocol is fully known and re-implementable** (PROTOCOL.md):
+   - `GET /listPrinters` → return an **HTML handshake page** (not JSON) with a
+     printer `<select>` whose option value is the format code (`zpl` for a
+     Zebra-class printer).
+   - That page `postMessage`s the opener `{requestType:"request", labelType, …}`.
+   - ups.com replies by `postMessage`-ing the **base64 label bytes** to the popup.
+   - The popup `POST`s `printerName=…&labelBytes=<b64>` to `/print`.
+   - `/print` Base64-decodes and prints; replies `status=…&target=HttpApp&…`.
+
+3. **This unlocks the Shipping-History flow without the userscript.** Because the
+   label bytes are delivered to the popup by `postMessage` from ups.com, it does
+   not matter whether the user came from the label page or from history. Our
+   bridge only failed the history flow because it returned JSON from
+   `/listPrinters` instead of the handshake HTML, so ups.com never sent the
+   label. Implementing the handshake fixes this.
+
+4. **Plan:** add a "native handshake" mode to `ups_print_bridge.py` — serve the
+   handshake HTML from `/listPrinters` (advertising the configured printer with
+   `labelType=zpl`), keep `/print` accepting `printerName`/`labelBytes`
+   (already supported). Then the Tampermonkey userscript becomes optional.
+   This must be validated against live ups.com (the exact `postMessage` shape
+   and `labelType` UPS expects can vary by page/region).
+
