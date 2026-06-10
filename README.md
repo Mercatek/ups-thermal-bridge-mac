@@ -40,37 +40,44 @@ printer prints ZPL perfectly fine via `lp`. This project bridges the two.
 
 ## How it works
 
+This project re-implements the **exact protocol** of the official "UPS Thermal
+Printing" app (recovered by reverse-engineering it — see [`research/`](research/)).
+When you click **Print Thermal Label**, UPS opens a small window pointed at
+`http://127.0.0.1:4349/listPrinters`; the service answers with a page that asks
+ups.com for the current label and prints it:
+
 ```
-  ups.com (label page)
-      │  1. a Tampermonkey userscript reads the page's own LabelRecovery
-      │     request, switches it to labelFormat=zpl, downloads the ZPL,
-      │     and "stages" it…                          ┌──────────────────────────┐
-      └─────────────── POST /stage ─────────────────▶ │  local service :4349     │
-                                                       │  (Python, LaunchAgent)   │
-  You click "Print Thermal Label"                      │                          │
-      │  2. UPS opens a hidden window that navigates   │  3. prints the staged    │
-      └─────────────── GET /listPrinters ────────────▶ │     ZPL with `lp`        │
-                                                       └────────────┬─────────────┘
-                                                                    │ lp -d <printer>
-                                                                    ▼
-                                                             your thermal printer
+  ups.com  ──── window.open(.../listPrinters?...) ───▶  local service :4349
+                                                         (Python, LaunchAgent)
+                                                              │ serves a page that…
+     ◀──── postMessage {requestType:"request", ───────────────┘
+     │      labelType:"zpl", ...}
+     │
+     │ ──── postMessage(<base64 label for THIS shipment>) ──▶  page POSTs /print
+     │                                                              │ lp -d <printer>
+     │                                                              ▼
+     │                                                       your thermal printer
 ```
 
-Two pieces:
+Because ups.com hands over the **current** label every time, you always get the
+right one — including from **Shipping History → "Get Labels"**.
+
+The pieces:
 
 1. **`ups_print_bridge.py`** — a tiny local HTTP service on port `4349`
-   (runs as a LaunchAgent, starts on login). It receives the ZPL and prints it
-   with `lp`. It also answers the `/listPrinters` request UPS makes when you
-   click *Print Thermal Label*.
-2. **`userscript/ups-thermal-bridge.user.js`** — a Tampermonkey userscript that,
-   on a label page, grabs the current label's ZPL from UPS's `LabelRecovery`
-   API and stages it in the service. It also adds a **🖨️ Print to thermal
-   printer** button.
+   (runs as a LaunchAgent, starts on login). On `GET /listPrinters` it serves
+   the handshake page; on `POST /print` it Base64-decodes the label and prints
+   it with `lp`. It de-dupes identical labels so nothing prints twice.
+2. **`userscript/ups-thermal-bridge.user.js`** *(optional)* — a Tampermonkey
+   userscript that, on a label page, also grabs the ZPL from UPS's
+   `LabelRecovery` API and adds a **🖨️ Print to thermal printer** button for an
+   extra manual copy. The handshake works without it; the userscript is just a
+   convenience.
 
-The cross-origin call from `https://ups.com` to `http://127.0.0.1:4349` is made
-with `GM_xmlhttpRequest`, which is not subject to mixed‑content / Private Network
-Access blocking — that is why this works where a WebSocket‑based approach
-(e.g. QZ Tray) gets blocked by Chrome.
+The local call from `https://ups.com` to `http://127.0.0.1:4349` succeeds where
+a WebSocket approach (e.g. QZ Tray) gets blocked by Chrome's Private Network
+Access, because here ups.com talks to the service via a same-origin page +
+`postMessage`, exactly as the official app intended.
 
 ---
 
@@ -113,45 +120,39 @@ installs a LaunchAgent (`com.ups-print-bridge`) that starts on login, and runs
 a smoke test. The script lives outside `~/Documents` on purpose — `launchd`
 cannot read TCC‑protected folders.
 
-### 3. Install the userscript
+### 3. (Optional) Install the userscript
+
+Not required — the print flow works with just the service. Install it only if
+you want the floating **🖨️ Print to thermal printer** button on label pages:
 
 1. Install **Tampermonkey** in Chrome.
 2. Tampermonkey → **Create a new script** → delete the template → paste the
    contents of [`userscript/ups-thermal-bridge.user.js`](userscript/ups-thermal-bridge.user.js) → **⌘S**.
-3. (Edit the `@namespace` line if you like.)
 
 ---
 
 ## Usage
 
-1. On ups.com, open the **label page** for your shipment (the URL looks like
-   `https://www.ups.com/uel/llp/1Z...`).
-2. Within ~2 seconds you'll see a green **"Label ready to print"** toast.
-3. Either click **🖨️ Print to thermal printer** (the button this script adds),
-   or click UPS's own **Print Thermal Label** — both print the current label.
+Just click **Print Thermal Label** on ups.com — from a label page **or** from
+**Shipping History → "Get Labels"**. The service grabs the current label from
+ups.com and prints it on your thermal printer. No userscript needed.
 
-One label per click; it always prints the label you're currently viewing.
+A small window flashes open ("Requesting the label from UPS… → Sent to the
+printer.") and closes itself. It always prints the label for the shipment you
+just chose, and never prints the same label twice in a row.
 
-## Two ways it prints
+> Format: the service advertises the printer as Zebra-class so UPS sends **ZPL**.
+> Change it with `UPS_BRIDGE_LABELTYPE` if your printer needs a different code
+> (e.g. `epl2`, `spl`) — see [`research/PROTOCOL.md`](research/PROTOCOL.md).
 
-1. **Userscript path (reliable on label pages):** on a `/uel/llp/...` page the
-   userscript grabs the ZPL and stages it; clicking print prints the staged label.
-2. **Native handshake path (experimental, no userscript needed):** when nothing
-   is staged, `GET /listPrinters` serves an HTML page that reproduces the
-   *official app's* protocol — it asks ups.com for the label via `postMessage`,
-   ups.com posts the base64 label back, and the page POSTs it to `/print`. This
-   is reverse-engineered from the real app (see [`research/PROTOCOL.md`](research/PROTOCOL.md))
-   and is the path that can make the **Shipping History → "Get Labels"** flow
-   work without Tampermonkey.
+### Optional: the userscript
+The Tampermonkey userscript isn't required. Install it only if you want the
+floating **🖨️ Print to thermal printer** button on label pages (handy for an
+extra copy). The main flow works without it.
 
-> The native path is **experimental** — the exact `postMessage`/`labelType`
-> shape UPS expects can vary by page and region, so validate it against live
-> ups.com. The userscript path remains the dependable default. Tune the format
-> code with `UPS_BRIDGE_LABELTYPE` (default `zpl`).
-
-### If "Get Labels" from history still doesn't print
-Fall back to opening the shipment's **label page** (`/uel/llp/...`) and printing
-there (userscript path), which is reliable.
+### If a particular shipment doesn't print
+The window will say *"No label received from UPS"* instead of printing the wrong
+label. Open that shipment's **label page** (`/uel/llp/...`) and try again.
 
 ## How it was built (reverse-engineering)
 
@@ -197,13 +198,14 @@ tail -f ~/Library/Logs/ups-print-bridge.log
 cat ~/Library/Logs/ups-last-label.zpl
 ```
 
-- **No toast / button does nothing** → make sure Tampermonkey is enabled and the
-  script is active on `ups.com`; open the console and look for `[UPS->Printer]`.
-- **Prints the wrong/old label** → make sure you are on the label page (not the
-  history list) and wait for the green toast before printing.
+- **Window says "No label received from UPS"** → that shipment's label wasn't
+  delivered; open its label page (`/uel/llp/...`) and try again. Watch the log
+  for `handshake_loaded` / `label_received`.
 - **Blank label** → your CUPS queue is probably not *raw*; re-add it as Raw/Raw Queue.
 - **`Failed to fetch` the very first time** → Chrome's Private Network Access
   warms up on the first request; just try again.
+- **(Userscript) floating button does nothing** → make sure Tampermonkey is
+  enabled on `ups.com`; open the console and look for `[UPS->Printer]`.
 
 ## Uninstall
 
