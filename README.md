@@ -132,14 +132,35 @@ cannot read TCC‑protected folders.
 
 One label per click; it always prints the label you're currently viewing.
 
-## Known limitation: Shipping History → "Get Labels"
+## Two ways it prints
 
-If you click **Get Labels** directly from the **Shipping History** list, UPS
-sends the label straight to the (missing) native helper and **never loads it on
-the page**, so there is nothing for the userscript to capture.
+1. **Userscript path (reliable on label pages):** on a `/uel/llp/...` page the
+   userscript grabs the ZPL and stages it; clicking print prints the staged label.
+2. **Native handshake path (experimental, no userscript needed):** when nothing
+   is staged, `GET /listPrinters` serves an HTML page that reproduces the
+   *official app's* protocol — it asks ups.com for the label via `postMessage`,
+   ups.com posts the base64 label back, and the page POSTs it to `/print`. This
+   is reverse-engineered from the real app (see [`research/PROTOCOL.md`](research/PROTOCOL.md))
+   and is the path that can make the **Shipping History → "Get Labels"** flow
+   work without Tampermonkey.
 
-**Workaround:** from the history, **open the shipment's label page**
-(`/uel/llp/...`) first, then print. On the label page capture is reliable.
+> The native path is **experimental** — the exact `postMessage`/`labelType`
+> shape UPS expects can vary by page and region, so validate it against live
+> ups.com. The userscript path remains the dependable default. Tune the format
+> code with `UPS_BRIDGE_LABELTYPE` (default `zpl`).
+
+### If "Get Labels" from history still doesn't print
+Fall back to opening the shipment's **label page** (`/uel/llp/...`) and printing
+there (userscript path), which is reliable.
+
+## How it was built (reverse-engineering)
+
+The `:4349` protocol was recovered by statically analysing the official app —
+see [`research/`](research/): [`PROTOCOL.md`](research/PROTOCOL.md) (the full
+protocol), [`REVERSE-ENGINEERING.md`](research/REVERSE-ENGINEERING.md) (method
+and conclusions), and `labelwindow_template.html` (the verbatim handshake page).
+TL;DR: the official macOS app is a 2018 Java/applet app that can't run on
+modern macOS, so re-implementing its protocol is the right approach.
 
 ## Configuration
 
