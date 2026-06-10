@@ -41,6 +41,7 @@ import sys
 import json
 import time
 import base64
+import hashlib
 import tempfile
 import subprocess
 import datetime
@@ -61,9 +62,15 @@ LP_BIN = "/usr/bin/lp"
 
 # ZPL waiting to be printed: the userscript drops it here (POST /stage) and it
 # is printed when you click "Print Thermal Label" (UPS navigates to /listPrinters).
-STAGED = {"data": None, "tracking": None, "ts": 0, "printed_ts": 0}
+STAGED = {"data": None, "tracking": None, "ts": 0}
 STAGE_TTL = 1800  # seconds: never print a staged label older than this
 LAST_LABEL_PATH = os.path.expanduser("~/Library/Logs/ups-last-label.zpl")
+
+# De-duplication: never print the SAME label bytes twice within this window.
+# Different labels always print; this only blocks accidental re-sends of the
+# identical label (e.g. the handshake page + a stray duplicate request).
+_LAST_PRINT = {"sig": None, "ts": 0}
+PRINT_DEDUPE_WINDOW = 5  # seconds
 
 _B64_RE = re.compile(rb"^[A-Za-z0-9+/=\s]+$")
 
@@ -164,7 +171,16 @@ def extract_zpl(body_bytes, content_type):
 
 
 def send_to_printer(zpl_bytes):
-    """Send ZPL bytes to the printer via `lp`. Returns (ok, detail)."""
+    """Send ZPL bytes to the printer via `lp`. Returns (ok, detail).
+
+    Skips an identical label re-sent within PRINT_DEDUPE_WINDOW seconds so the
+    same label is never printed twice from overlapping requests.
+    """
+    sig = hashlib.sha1(zpl_bytes).hexdigest()
+    now = time.time()
+    if sig == _LAST_PRINT["sig"] and now - _LAST_PRINT["ts"] < PRINT_DEDUPE_WINDOW:
+        log("PRINT skipped (identical label within %ss) sig=%s" % (PRINT_DEDUPE_WINDOW, sig[:8]))
+        return True, "duplicate-skipped"
     tmp = tempfile.NamedTemporaryFile(prefix="ups_label_", suffix=".zpl", delete=False)
     try:
         tmp.write(zpl_bytes)
@@ -182,6 +198,9 @@ def send_to_printer(zpl_bytes):
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         ok = proc.returncode == 0
         detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if ok:  # remember only successful prints, so a failed one can be retried
+            _LAST_PRINT["sig"] = sig
+            _LAST_PRINT["ts"] = time.time()
         log("PRINT cmd=%s rc=%s out=%s" % (" ".join(cmd), proc.returncode, detail))
         return ok, detail
     except Exception as exc:
@@ -390,30 +409,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.endswith("listprinters") or "printer" in path:
             if self._is_navigation():
-                data = STAGED.get("data")
-                age = time.time() - STAGED.get("ts", 0)
-                time_since_printed = time.time() - STAGED.get("printed_ts", 0)
-                # If we already printed this ZPL and more than 3 seconds have passed,
-                # it's a NEW /listPrinters call (user switched labels). Clear the old one.
-                if data and time_since_printed > 3 and STAGED.get("printed_ts", 0) > 0:
-                    log("    (clearing old staged ZPL, user switched labels)")
+                # Always serve the native handshake page: ups.com posts the FRESH
+                # label for the CURRENT shipment to it (exactly like the official
+                # app), which then POSTs it to /print. This fixes the "old label"
+                # bug where a previously-staged ZPL shadowed a new request. Any
+                # stale staged data is cleared so it can never be reprinted.
+                if STAGED.get("data"):
+                    log("    (clearing staged ZPL; handshake fetches the current label)")
                     STAGED["data"] = None
                     STAGED["tracking"] = None
-                    data = None
-                if data and age <= STAGE_TTL:
-                    z = _zpl_from_values([data])
-                    if z:
-                        ok, detail = send_to_printer(z)
-                        STAGED["printed_ts"] = time.time()
-                        log("    (label window -> printing staged ZPL tracking=%s len=%s ok=%s)"
-                            % (STAGED.get("tracking"), len(z), ok))
-                        self._send_html(print_done_html(ok, detail))
-                        return
-                if data:
-                    log("    (label window but staged ZPL is stale %.0fs -> not printing)" % age)
-                # Nothing staged -> attempt the native handshake (works without
-                # the userscript, incl. the Shipping-History flow). See PROTOCOL.md.
-                log("    (no staged ZPL -> serving native handshake page)")
+                log("    (serving native handshake page)")
                 self._send_html(handshake_html())
             else:
                 self._send_json(list_printers_payload(query))
