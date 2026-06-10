@@ -2,3 +2,8 @@
 *.log
 *.zpl
 *.dmg
+
+# reverse-engineering workspace (binaries not committed)
+research/_work/
+*.exe
+*.jar
