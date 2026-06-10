@@ -61,7 +61,7 @@ LP_BIN = "/usr/bin/lp"
 
 # ZPL waiting to be printed: the userscript drops it here (POST /stage) and it
 # is printed when you click "Print Thermal Label" (UPS navigates to /listPrinters).
-STAGED = {"data": None, "tracking": None, "ts": 0}
+STAGED = {"data": None, "tracking": None, "ts": 0, "printed_ts": 0}
 STAGE_TTL = 1800  # seconds: never print a staged label older than this
 LAST_LABEL_PATH = os.path.expanduser("~/Library/Logs/ups-last-label.zpl")
 
@@ -392,10 +392,19 @@ class Handler(BaseHTTPRequestHandler):
             if self._is_navigation():
                 data = STAGED.get("data")
                 age = time.time() - STAGED.get("ts", 0)
+                time_since_printed = time.time() - STAGED.get("printed_ts", 0)
+                # If we already printed this ZPL and more than 3 seconds have passed,
+                # it's a NEW /listPrinters call (user switched labels). Clear the old one.
+                if data and time_since_printed > 3 and STAGED.get("printed_ts", 0) > 0:
+                    log("    (clearing old staged ZPL, user switched labels)")
+                    STAGED["data"] = None
+                    STAGED["tracking"] = None
+                    data = None
                 if data and age <= STAGE_TTL:
                     z = _zpl_from_values([data])
                     if z:
                         ok, detail = send_to_printer(z)
+                        STAGED["printed_ts"] = time.time()
                         log("    (label window -> printing staged ZPL tracking=%s len=%s ok=%s)"
                             % (STAGED.get("tracking"), len(z), ok))
                         self._send_html(print_done_html(ok, detail))
