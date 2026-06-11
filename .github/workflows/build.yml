@@ -1,0 +1,63 @@
+name: build
+
+# CI for the macOS app + engine. Builds on every push/PR so a broken commit is
+# caught before release. (Notarization is a separate, credentialed step — see
+# SECURITY.md — and is intentionally not run here.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14   # Apple Silicon runner, ships Swift via Xcode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swiftc --version
+
+      - name: Lint Python service
+        run: python3 -m py_compile ups_print_bridge.py
+
+      - name: Build engine (headless CLI)
+        run: |
+          cd macos-app
+          ./build-cli.sh
+          test -f build/ups-bridge-cli
+
+      - name: Build app bundle
+        run: |
+          cd macos-app
+          ./build-app.sh
+          test -d "build/UPS Print Bridge.app/Contents/MacOS"
+          test -f "build/UPS Print Bridge.app/Contents/Info.plist"
+
+      - name: Smoke test the engine (start, ping, stop)
+        run: |
+          cd macos-app
+          UPS_BRIDGE_PRINTER=__ci_no_printer__ ./build/ups-bridge-cli &
+          PID=$!
+          sleep 2
+          curl -fsS http://127.0.0.1:4349/ping
+          # arbitrary web origin must be blocked from printing.
+          # labelBytes=XlhBXlha is base64 of "^XA^XZ" (valid ZPL → reaches the
+          # origin gate; with a non-allowed origin it must return 403).
+          code=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:4349/print \
+                 -H "Origin: https://evil.example" -H "Content-Type: application/x-www-form-urlencoded" \
+                 --data 'labelBytes=XlhBXlha')
+          test "$code" = "403" || (echo "expected 403 for evil origin, got $code" && exit 1)
+          kill $PID
+
+      - name: Package app as zip artifact
+        run: |
+          cd macos-app/build
+          ditto -c -k --keepParent "UPS Print Bridge.app" "UPS-Print-Bridge.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UPS-Print-Bridge-macos
+          path: macos-app/build/UPS-Print-Bridge.zip
+          if-no-files-found: error

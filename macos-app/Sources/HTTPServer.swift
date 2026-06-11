@@ -89,6 +89,7 @@ final class HTTPServer {
     private var lastPrintSig: String = ""
     private var lastPrintAt: Date = .distantPast
     private let dedupeWindow: TimeInterval = 5
+    private let printLock = NSLock()
     var onActivity: (() -> Void)?
 
     init(port: UInt16) { self.port = port }
@@ -230,6 +231,13 @@ final class HTTPServer {
                 sendJSON(fd, origin: origin, ["status": "ok"]); return
             }
             if let zpl = ZPL.extract(body: req.body, contentType: req.headers["content-type"] ?? "") {
+                // Side-effect guard: only the local handshake page, ups.com, or
+                // local tools (no Origin) may trigger a print. This blocks any
+                // arbitrary website you visit from printing to your label printer.
+                if !originAllowedForPrint(req.headers["origin"]) {
+                    BridgeLog.shared.log("BLOCKED print from origin \(req.headers["origin"] ?? "?")")
+                    sendJSON(fd, origin: origin, ["status": "forbidden", "detail": "origin not allowed"], status: 403); return
+                }
                 let (ok, detail) = printDeduped(zpl)
                 sendJSON(fd, origin: origin, ["status": ok ? "ok" : "error",
                                               "bytes": "\(zpl.count)", "detail": detail],
@@ -241,8 +249,20 @@ final class HTTPServer {
         send(fd, status: 404, origin: origin)
     }
 
+    // Only the local handshake page, ups.com, or local tools (no Origin header)
+    // may print. Everything else (arbitrary websites) is rejected.
+    private func originAllowedForPrint(_ origin: String?) -> Bool {
+        guard let o = origin, !o.isEmpty, o != "*" else { return true }   // CLI / GM_xhr / same-process
+        guard let host = URL(string: o)?.host?.lowercased() else { return false }
+        if host == "127.0.0.1" || host == "localhost" { return true }
+        if host == "ups.com" || host.hasSuffix(".ups.com") { return true }
+        return false
+    }
+
     // Print, skipping an identical label re-sent within the dedupe window.
+    // Serialized: concurrent connections can't race the dedupe state / printer.
     private func printDeduped(_ zpl: Data) -> (Bool, String) {
+        printLock.lock(); defer { printLock.unlock() }
         let sig = sha1(zpl)
         if sig == lastPrintSig && Date().timeIntervalSince(lastPrintAt) < dedupeWindow {
             BridgeLog.shared.log("PRINT skipped (identical label within \(Int(dedupeWindow))s)")
