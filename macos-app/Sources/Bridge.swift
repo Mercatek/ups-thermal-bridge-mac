@@ -62,16 +62,14 @@ final class BridgeLog {
 // MARK: - Printers (CUPS via lp / lpstat)
 
 enum Printers {
-    /// CUPS queue names, via `lpstat -p`.
+    /// CUPS queue names. Uses `lpstat -e` (enumerates destinations, one name per
+    /// line) which is locale-independent — unlike `lpstat -p`, whose text is
+    /// translated (e.g. "la impresora X está inactiva" in Spanish).
     static func list() -> [String] {
-        let out = run("/usr/bin/lpstat", ["-p"])
-        var names: [String] = []
-        for line in out.split(separator: "\n") {
-            // "printer Bixolon_SRP770III is idle.  enabled since ..."
-            let parts = line.split(separator: " ")
-            if parts.count >= 2 && parts[0] == "printer" { names.append(String(parts[1])) }
-        }
-        return names
+        let out = run("/usr/bin/lpstat", ["-e"])
+        return out.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
     }
 
     /// Print raw bytes to a CUPS queue by piping them to `lp` via stdin.
