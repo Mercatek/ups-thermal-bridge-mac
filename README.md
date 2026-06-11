@@ -11,6 +11,13 @@ queue (most Zebra/Bixolon/Eltron‑style printers).
 
 > Not affiliated with or endorsed by UPS. Use at your own risk.
 
+### ⬇️ Download
+
+**[Download the latest release (.dmg)](https://github.com/Mercatek/ups-thermal-bridge-mac/releases/latest)** —
+open it, drag **UPS Print Bridge** to Applications, launch it, and a setup wizard
+does the rest. First launch: right-click → **Open** (the build isn't
+Apple-notarized). Prefer to build from source? See [Install](#install).
+
 ---
 
 ## Does this solve your problem?
