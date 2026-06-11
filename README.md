@@ -223,6 +223,12 @@ cat ~/Library/Logs/ups-last-label.zpl
 - [`tools/console-scan.js`](tools/console-scan.js) — shows whether the ZPL /
   LabelRecovery endpoint is reachable from the current page.
 
+## Support
+
+This tool is free and open source. If it saved you time, you can leave a
+one-time tip via **[PayPal](https://paypal.me/dmerizco)** (or the **Sponsor**
+button at the top of the repo). Totally optional — thank you! 🙏
+
 ## Disclaimer
 
 This is an unofficial, community tool. It does not modify UPS data; it only
