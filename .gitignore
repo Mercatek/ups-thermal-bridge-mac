@@ -7,3 +7,7 @@
 research/_work/
 *.exe
 *.jar
+
+# compiled Swift app artifacts
+macos-app/build/
+*.app
