@@ -8,36 +8,46 @@ straight from ups.com to a CUPS printer, without the (Windows-only / Java-era)
 official "UPS Thermal Printing" app.
 
 This fork targets printers that do NOT speak ZPL natively (e.g. Brother QL
-label printers, which use their own raster protocol). Instead of piping raw
-ZPL to a raw CUPS queue, ZPL is rendered to a PNG locally via `labelize`
-(https://github.com/GOODBOY008/labelize -- fully offline, no third-party
-service) and the PNG is printed through the printer's normal CUPS/AirPrint
-driver. If your printer DOES speak ZPL natively (Zebra/Bixolon/Eltron), use
-the upstream project instead: https://github.com/Mercatek/ups-thermal-bridge-mac
+label printers, which use their own raster protocol). ZPL is rendered to a
+PNG locally via `labelize` (https://github.com/GOODBOY008/labelize -- fully
+offline, no third-party service). If your printer DOES speak ZPL natively
+(Zebra/Bixolon/Eltron), use the upstream project instead:
+https://github.com/Mercatek/ups-thermal-bridge-mac
+
+Deliberately does NOT print automatically. The rendered PNG is opened in
+Preview.app and left there -- printing (choosing the printer, paper size,
+hitting the real Print button) is entirely manual, in Preview's own native
+dialog. Earlier revisions tried a custom confirm dialog, then tried driving
+Preview's print command via AppleScript; the latter turned out to silently
+submit to whatever printer Preview had last used with no dialog shown at
+all, which is worse than no automation. Doing nothing beyond "open it" is
+the version that's actually safe.
 
 It works together with a Tampermonkey userscript (see ./userscript) that grabs
 the label's ZPL from UPS's own `LabelRecovery` API and "stages" it here. When
 you click **Print Thermal Label** on ups.com, UPS opens a hidden window that
-navigates to this service (`/listPrinters`) — that is our cue to render and
-print the staged ZPL.
+navigates to this service (`/listPrinters`) — that is our cue to render the
+staged ZPL and open it in Preview.
 
 Endpoints
 ---------
   GET  /listPrinters   UPS hits this when you click "Print Thermal Label".
                        - Top-level navigation (the label window) + a staged ZPL
-                         -> print it. Otherwise serve a tiny auto-closing page.
+                         -> render and open it. Otherwise serve a tiny
+                         auto-closing page.
                        - fetch/XHR -> return the printer list as JSON.
   POST /stage          The userscript posts {trackingNumber, data:<zpl|base64>}.
-  POST /print          Print arbitrary ZPL now (userscript floating button).
+  POST /print          Render arbitrary ZPL now (userscript floating button).
                        Accepts JSON / base64 / raw ^XA...^XZ.
   POST /probe          Diagnostics sink (logged only).
   GET  /favicon.ico    204.
 
 Configuration (all optional, via environment variables)
-  UPS_BRIDGE_PRINTER          CUPS queue name   (default: Brother_QL_1110NWB)
+  UPS_BRIDGE_PRINTER          printer name advertised to ups.com's handshake
+                              JS (cosmetic only -- nothing here actually
+                              prints, see above)  (default: Brother_QL_1110NWB)
   UPS_BRIDGE_PORT             port to listen on (default: 4349)
   UPS_BRIDGE_HOST             interface         (default: 127.0.0.1)
-  UPS_BRIDGE_MEDIA            CUPS media name for -o media=  (default: 103x164mm)
   UPS_BRIDGE_LABEL_WIDTH_MM   label width passed to labelize  (default: 103)
   UPS_BRIDGE_LABEL_HEIGHT_MM  label height passed to labelize (default: 164)
   UPS_BRIDGE_LABEL_DPMM       labelize render density: 6, 8, 12, or 24 (default: 8 --
@@ -84,18 +94,16 @@ LOG_PATH = os.environ.get(
 )
 
 LABELIZE_BIN = os.environ.get("UPS_BRIDGE_LABELIZE_BIN") or _find_labelize()
-MEDIA = os.environ.get("UPS_BRIDGE_MEDIA", "103x164mm")
 LABEL_WIDTH_MM = os.environ.get("UPS_BRIDGE_LABEL_WIDTH_MM", "103")
 LABEL_HEIGHT_MM = os.environ.get("UPS_BRIDGE_LABEL_HEIGHT_MM", "164")
 LABEL_DPMM = os.environ.get("UPS_BRIDGE_LABEL_DPMM", "8")
-
-LP_BIN = "/usr/bin/lp"
 
 # ZPL waiting to be printed: the userscript drops it here (POST /stage) and it
 # is printed when you click "Print Thermal Label" (UPS navigates to /listPrinters).
 STAGED = {"data": None, "tracking": None, "ts": 0}
 STAGE_TTL = 1800  # seconds: never print a staged label older than this
 LAST_LABEL_PATH = os.path.expanduser("~/Library/Logs/ups-last-label.zpl")
+LAST_LABEL_PNG_PATH = os.path.expanduser("~/Library/Logs/ups-last-label.png")
 
 # De-duplication: never print the SAME label bytes twice within this window.
 # Different labels always print; this only blocks accidental re-sends of the
@@ -218,6 +226,27 @@ def normalize_orientation(zpl_bytes):
     return _PO_RE.sub(b"^PON", zpl_bytes)
 
 
+def open_in_preview(png_path):
+    """Open the rendered label in Preview.app. Returns (ok, detail).
+
+    Deliberately just opens it -- no scripted print command. Preview's own
+    `print` AppleScript verb was tried and rejected: it submitted silently
+    to whatever printer Preview had last used, with no dialog and no way to
+    tell it happened. Manual Cmd+P in the opened window is the safe version.
+    """
+    try:
+        proc = subprocess.run(
+            ["open", "-a", "Preview", png_path], capture_output=True, text=True, timeout=10
+        )
+    except Exception as exc:
+        log("OPEN ERROR %r" % (exc,))
+        return False, str(exc)
+    ok = proc.returncode == 0
+    detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    log("OPEN cmd=open -a Preview %s rc=%s out=%s" % (png_path, proc.returncode, detail))
+    return ok, detail
+
+
 def render_zpl_to_png(zpl_path, png_path):
     """Render a ZPL file to PNG via labelize. Returns (ok, detail)."""
     cmd = [
@@ -236,53 +265,54 @@ def render_zpl_to_png(zpl_path, png_path):
     return ok, detail
 
 
-def send_to_printer(zpl_bytes):
-    """Render ZPL to a PNG (labelize) and print the PNG via `lp`. Returns (ok, detail).
+def handle_label(zpl_bytes):
+    """Render ZPL to a PNG (labelize) and open it in Preview.app. Returns (ok, detail).
 
-    The physical printer (a Brother QL, not a Zebra-class device) has no ZPL
-    interpreter, so the ZPL bytes UPS hands us can't be piped to it directly --
-    they're rendered to a raster image first and printed through the printer's
-    normal CUPS/AirPrint driver instead of a raw ZPL passthrough queue.
+    Does not print anything. Does not ask the printer's name, media size, or
+    anything else -- printing is entirely manual, in Preview's own native
+    Print dialog, once the window is open. See the module docstring for why.
 
     Skips an identical label re-sent within PRINT_DEDUPE_WINDOW seconds so the
-    same label is never printed twice from overlapping requests.
+    same label doesn't reopen a fresh Preview window from overlapping requests.
     """
     sig = hashlib.sha1(zpl_bytes).hexdigest()
     now = time.time()
     if sig == _LAST_PRINT["sig"] and now - _LAST_PRINT["ts"] < PRINT_DEDUPE_WINDOW:
-        log("PRINT skipped (identical label within %ss) sig=%s" % (PRINT_DEDUPE_WINDOW, sig[:8]))
+        log("OPEN skipped (identical label within %ss) sig=%s" % (PRINT_DEDUPE_WINDOW, sig[:8]))
         return True, "duplicate-skipped"
 
     zpl_tmp = tempfile.NamedTemporaryFile(prefix="ups_label_", suffix=".zpl", delete=False)
-    png_path = zpl_tmp.name[: -len(".zpl")] + ".png"
+    png_tmp_path = zpl_tmp.name[: -len(".zpl")] + ".png"
     try:
         zpl_tmp.write(normalize_orientation(zpl_bytes))
         zpl_tmp.flush()
         zpl_tmp.close()
         try:
-            with open(LAST_LABEL_PATH, "wb") as fh:  # debug copy of last printed label
+            with open(LAST_LABEL_PATH, "wb") as fh:  # debug copy of last-handled label
                 fh.write(zpl_bytes)
         except Exception:
             pass
 
-        rendered, render_detail = render_zpl_to_png(zpl_tmp.name, png_path)
+        rendered, render_detail = render_zpl_to_png(zpl_tmp.name, png_tmp_path)
         if not rendered:
             return False, "render failed: " + render_detail
 
-        cmd = [LP_BIN, "-d", PRINTER, "-o", "media=" + MEDIA, png_path]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        ok = proc.returncode == 0
-        detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
-        if ok:  # remember only successful prints, so a failed one can be retried
+        # Copy to a stable path -- the tempfile gets deleted below, but
+        # Preview needs something that still exists after this function
+        # returns, and a fixed path means "reopen the last label" always
+        # works even after Preview's window is closed.
+        shutil.copyfile(png_tmp_path, LAST_LABEL_PNG_PATH)
+
+        ok, detail = open_in_preview(LAST_LABEL_PNG_PATH)
+        if ok:  # remember only successful opens, so a failed one can be retried
             _LAST_PRINT["sig"] = sig
             _LAST_PRINT["ts"] = time.time()
-        log("PRINT cmd=%s rc=%s out=%s" % (" ".join(cmd), proc.returncode, detail))
         return ok, detail
     except Exception as exc:
-        log("PRINT ERROR %r" % (exc,))
+        log("OPEN ERROR %r" % (exc,))
         return False, str(exc)
     finally:
-        for p in (zpl_tmp.name, png_path):
+        for p in (zpl_tmp.name, png_tmp_path):
             try:
                 os.unlink(p)
             except Exception:
@@ -352,11 +382,11 @@ function looksLikeLabel(s){
 }
 var printed=false;
 function gotLabel(data){
-  if(printed) return; printed=true; setS('Printing on '+PRINTER+'…');
+  if(printed) return; printed=true; setS('Rendering the label…');
   probe({event:'label_received',len:(data||'').length});
   var body='printerName='+encodeURIComponent(PRINTER)+'&labelBytes='+encodeURIComponent(data);
   var x=new XMLHttpRequest();
-  x.onreadystatechange=function(){ if(this.readyState===4){ setS('Sent to the printer.');
+  x.onreadystatechange=function(){ if(this.readyState===4){ setS('Opened in Preview -- print it from there.');
     try{ if(window.opener) window.opener.postMessage({requestType:'response',query:this.response},origin);}catch(e){}
     setTimeout(function(){try{window.close();}catch(e){}},1500); } };
   x.open('POST','http://127.0.0.1:'+PORT+'/print',true);
@@ -383,7 +413,7 @@ def handshake_html():
 
 def print_done_html(ok, detail=""):
     color = "#2D7A4F" if ok else "#C53030"
-    msg = "Label sent to the printer" if ok else "Could not print: " + detail
+    msg = "Opened in Preview -- print it from there" if ok else "Could not open the label: " + detail
     return ("""<!doctype html><html><head><meta charset="utf-8"><title>UPS Print Bridge</title></head>
 <body style="font:15px -apple-system,Arial;padding:24px;text-align:center;color:%s">
 <h2>%s</h2><p>This window closes automatically&hellip;</p>
@@ -478,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
         # ZPL passed in the query string?
         zpl = _zpl_from_values([v for lst in query.values() for v in lst])
         if zpl:
-            ok, detail = send_to_printer(zpl)
+            ok, detail = handle_label(zpl)
             self._send_json({"status": "ok" if ok else "error", "success": ok,
                              "printer": PRINTER, "bytes": len(zpl), "detail": detail},
                             code=200 if ok else 500)
@@ -524,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         zpl = extract_zpl(body, self.headers.get("Content-Type", ""))
         if zpl:
-            ok, detail = send_to_printer(zpl)
+            ok, detail = handle_label(zpl)
             self._send_json({"status": "ok" if ok else "error", "success": ok,
                              "printer": PRINTER, "bytes": len(zpl), "detail": detail},
                             code=200 if ok else 500)
@@ -540,7 +570,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     log("=" * 70)
-    log("UPS Print Bridge starting on http://%s:%d  printer=%s media=%s" % (HOST, PORT, PRINTER, MEDIA))
+    log("UPS Print Bridge starting on http://%s:%d  printer=%s (cosmetic; prints are manual via Preview)" % (HOST, PORT, PRINTER))
     log("Log: %s" % LOG_PATH)
     try:
         srv = ThreadingHTTPServer((HOST, PORT), Handler)

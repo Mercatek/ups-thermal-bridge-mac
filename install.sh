@@ -15,7 +15,6 @@ LABEL="com.ups-print-bridge"
 APP_DIR="$HOME/Library/Application Support/UPSPrintBridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PRINTER="${1:-${UPS_BRIDGE_PRINTER:-Brother_QL_1110NWB}}"
-MEDIA="${UPS_BRIDGE_MEDIA:-103x164mm}"
 LABEL_WIDTH_MM="${UPS_BRIDGE_LABEL_WIDTH_MM:-103}"
 LABEL_HEIGHT_MM="${UPS_BRIDGE_LABEL_HEIGHT_MM:-164}"
 LABEL_DPMM="${UPS_BRIDGE_LABEL_DPMM:-8}"
@@ -76,8 +75,6 @@ cat > "$PLIST" <<PLISTEOF
         <string>127.0.0.1</string>
         <key>UPS_BRIDGE_LABELIZE_BIN</key>
         <string>$LABELIZE_BIN</string>
-        <key>UPS_BRIDGE_MEDIA</key>
-        <string>$MEDIA</string>
         <key>UPS_BRIDGE_LABEL_WIDTH_MM</key>
         <string>$LABEL_WIDTH_MM</string>
         <key>UPS_BRIDGE_LABEL_HEIGHT_MM</key>
