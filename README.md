@@ -1,4 +1,4 @@
-# UPS Thermal Label Bridge for macOS (Brother QL / non-ZPL printer fork)
+# UPS Thermal Label Bridge for macOS — Non-ZPL Printer Support
 
 Print **UPS thermal (ZPL) shipping labels** straight from **ups.com** to a
 label printer on **macOS** — without the official "UPS Thermal Printing" app
