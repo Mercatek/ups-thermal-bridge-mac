@@ -11,3 +11,4 @@ research/_work/
 # compiled Swift app artifacts
 macos-app/build/
 *.app
+__pycache__/

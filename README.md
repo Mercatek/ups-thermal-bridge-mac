@@ -1,136 +1,116 @@
-# UPS Thermal Label Bridge for macOS
+# UPS Thermal Label Bridge for macOS — Non-ZPL Printer Support
 
-Print **UPS thermal (ZPL) shipping labels** straight from **ups.com** to your
-USB thermal label printer on **macOS** — without the official "UPS Thermal
-Printing" app (which is Windows-only in practice / a dead Java‑era app on
-modern macOS).
+Print **UPS thermal (ZPL) shipping labels** straight from **ups.com** to a
+label printer on **macOS** — without the official "UPS Thermal Printing" app
+(which is Windows-only in practice / a dead Java-era app on modern macOS).
 
-Tested on macOS (Apple Silicon) with Google Chrome and a Bixolon SRP‑770III.
-It should work with any label printer that accepts **ZPL** through a CUPS *raw*
-queue (most Zebra/Bixolon/Eltron‑style printers).
+This is a fork of [Mercatek/ups-thermal-bridge-mac](https://github.com/Mercatek/ups-thermal-bridge-mac),
+which targets **Zebra-class printers that speak ZPL natively** (Zebra,
+Bixolon, Eltron) via a raw CUPS queue. This fork is for everyone else —
+printers like the **Brother QL series** that use their own raster protocol
+and have no ZPL interpreter at all, so raw ZPL passthrough doesn't work no
+matter how the CUPS queue is configured.
 
 > Not affiliated with or endorsed by UPS. Use at your own risk.
-
-### ⬇️ Download
-
-**[Download the latest release (.dmg)](https://github.com/Mercatek/ups-thermal-bridge-mac/releases/latest)** —
-open it, drag **UPS Print Bridge** to Applications, launch it, and a setup wizard
-does the rest. First launch: right-click → **Open** (the build isn't
-Apple-notarized). Prefer to build from source? See [Install](#install).
 
 ---
 
 ## Does this solve your problem?
 
-This is for you if, on a **Mac**, you've run into any of these:
+This is for you if, on a **Mac**, with a **non-Zebra label printer** (Brother
+QL series, or anything else that doesn't speak ZPL natively):
 
 - Clicking **"Print Thermal Label"** on **ups.com** does nothing, or opens an empty/blank window.
-- The official **UPS Thermal Printing** app is **Windows-only**, or the old Mac/Java version won't run on modern macOS / **Apple Silicon**.
-- You need to print **UPS ZPL labels** to a **Bixolon, Zebra or Eltron** thermal printer straight from the browser.
+- The official **UPS Thermal Printing** app is Windows-only, or won't run on modern macOS.
 - UPS expects a local helper on **`127.0.0.1:4349`** that doesn't exist on your Mac.
-- **QZ Tray** / WebSocket printing keeps getting blocked by Chrome (Private Network Access).
+- You tried the [upstream project](https://github.com/Mercatek/ups-thermal-bridge-mac) and printed garbage, because your printer doesn't understand ZPL at all.
 
-> Search terms: *UPS thermal label macOS*, *print UPS ZPL label on Mac*, *UPS Thermal Printing app Mac alternative*, *UPS print thermal label not working Mac*, *UPS 127.0.0.1:4349 Mac*, *Bixolon/Zebra UPS label Chrome Mac*.
+If you have a **Zebra/Bixolon/Eltron** printer that already speaks ZPL, use
+the upstream project instead — it prints directly via a raw CUPS queue with
+no rendering step, which is simpler when it applies.
 
 ---
 
-## The problem
+## How it's different from upstream
 
-When you click **Print Thermal Label** on ups.com, the browser tries to reach a
-local helper app on `http://127.0.0.1:4349`. That helper only ships for Windows;
-the old macOS build relies on Java applets and NPAPI plugins that no longer
-exist. So on a Mac, clicking *Print Thermal Label* does nothing useful.
+Upstream pipes raw ZPL bytes straight to a CUPS *raw* queue, which only works
+if the printer's firmware understands ZPL. A Brother QL has no ZPL
+interpreter — it needs its own raster protocol, and just doesn't understand
+what raw ZPL bytes mean.
 
-Meanwhile, UPS already has the label as **ZPL**: it fetches it from its own API
-`https://webapis.ups.com/uel/api/LabelRecovery?...&labelFormat=zpl`, and your
-printer prints ZPL perfectly fine via `lp`. This project bridges the two.
-
-## How it works
-
-This project re-implements the **exact protocol** of the official "UPS Thermal
-Printing" app (recovered by reverse-engineering it — see [`research/`](research/)).
-When you click **Print Thermal Label**, UPS opens a small window pointed at
-`http://127.0.0.1:4349/listPrinters`; the service answers with a page that asks
-ups.com for the current label and prints it:
+This fork keeps upstream's hard part completely untouched: the
+reverse-engineered protocol that gets ups.com to hand over the label's real
+ZPL bytes to a local service. It only changes what happens *after* those
+bytes arrive:
 
 ```
-  ups.com  ──── window.open(.../listPrinters?...) ───▶  local service :4349
-                                                         (Python, LaunchAgent)
-                                                              │ serves a page that…
-     ◀──── postMessage {requestType:"request", ───────────────┘
-     │      labelType:"zpl", ...}
-     │
-     │ ──── postMessage(<base64 label for THIS shipment>) ──▶  page POSTs /print
-     │                                                              │ lp -d <printer>
-     │                                                              ▼
-     │                                                       your thermal printer
+  ups.com  ──── (same handshake as upstream, unmodified) ───▶  local service :4349
+                                                                     │
+                                                     labelize renders ZPL -> PNG
+                                                     (offline, no third-party service)
+                                                                     │
+                                                          opens in Preview.app
+                                                                     │
+                                                    you print it yourself (Cmd+P)
 ```
 
-Because ups.com hands over the **current** label every time, you always get the
-right one — including from **Shipping History → "Get Labels"**.
+Two things changed after the render step vs. earlier revisions of this fork,
+worth knowing if you're adapting this for your own printer:
 
-The pieces:
+- **Render density matters, and it's not the printer's resolution.** ZPL
+  coordinates are dot numbers with no inherent physical size — they're
+  authored assuming a density, almost universally **8 dots/mm (203dpi)**,
+  regardless of what printer eventually renders them. Rendering at your
+  printer's *actual* resolution (e.g. 300dpi) silently shrinks everything
+  toward the top-left of the requested canvas instead of filling it.
+- **Real UPS ZPL often includes `^POI`** (Print Orientation: Inverted) — a
+  Zebra-specific mechanical compensation for how labels feed through *that*
+  printer class. It has no meaning once you're rendering to an image instead
+  of feeding a Zebra engine directly, and left in place it renders the whole
+  label upside-down. This fork strips it (forces `^PON`) before every render.
 
-1. **`ups_print_bridge.py`** — a tiny local HTTP service on port `4349`
-   (runs as a LaunchAgent, starts on login). On `GET /listPrinters` it serves
-   the handshake page; on `POST /print` it Base64-decodes the label and prints
-   it with `lp`. It de-dupes identical labels so nothing prints twice.
-2. **`userscript/ups-thermal-bridge.user.js`** *(optional)* — a Tampermonkey
-   userscript that, on a label page, also grabs the ZPL from UPS's
-   `LabelRecovery` API and adds a **🖨️ Print to thermal printer** button for an
-   extra manual copy. The handshake works without it; the userscript is just a
-   convenience.
-
-The local call from `https://ups.com` to `http://127.0.0.1:4349` succeeds where
-a WebSocket approach (e.g. QZ Tray) gets blocked by Chrome's Private Network
-Access, because here ups.com talks to the service via a same-origin page +
-`postMessage`, exactly as the official app intended.
+**Printing is deliberately manual, not automatic.** Earlier iterations tried
+a custom confirm dialog, then tried scripting Preview's own `print` command
+to reuse the native print sheet. The second approach seemed clever but
+turned out to silently submit to whatever printer Preview had last used,
+with no dialog and no way to tell it happened — worse than no automation.
+What's here now just opens the rendered label in Preview.app and stops.
+Printing — picking the printer, paper size, hitting Print — is entirely
+manual from there, the same as printing any other image.
 
 ---
 
 ## Requirements
 
 - macOS with **Python 3** (`python3 --version`; install via `xcode-select --install` if missing).
-- Your thermal printer added to **CUPS as a raw queue** (see below).
-- **Google Chrome** (recommended) with the **Tampermonkey** extension.
+- [`labelize`](https://github.com/GOODBOY008/labelize) — offline ZPL/EPL renderer:
+  ```bash
+  brew tap GOODBOY008/homebrew-labelize && brew install labelize
+  ```
+- Your printer already installed as a normal CUPS/AirPrint queue (no special
+  "raw queue" setup needed — unlike upstream, since nothing here talks ZPL to
+  the printer directly).
+- **Google Chrome** (recommended) with the **Tampermonkey** extension (optional, see below).
 
 ## Install
 
-### 1. Add your printer to CUPS as a *raw* queue
-
-The printer must accept ZPL pass‑through. The easiest way:
-
-1. Connect the printer by USB and turn it on.
-2. Open `http://localhost:631/admin` in a browser → **Add Printer**.
-3. Pick your printer under **Local Printers** → Continue.
-4. Give it a simple **Name** (no spaces), e.g. `Bixolon_SRP770III` — remember it.
-5. For **Make**, choose **Raw**; for **Model**, choose **Raw Queue**. → Add Printer.
-
-Verify it prints ZPL:
-
 ```bash
-printf '^XA^FO50,50^ADN,36,20^FDtest^FS^XZ' | lp -d YOUR_PRINTER_NAME
-```
-
-> Tip: if CUPS web admin is locked, run `cupsctl WebInterface=yes` first.
-
-### 2. Install the local service
-
-```bash
-git clone https://github.com/Mercatek/ups-thermal-bridge-mac.git
+git clone https://github.com/voltechs/ups-thermal-bridge-mac.git
 cd ups-thermal-bridge-mac
-./install.sh "YOUR_PRINTER_NAME"      # omit the name to use Bixolon_SRP770III
+./install.sh "YOUR_PRINTER_QUEUE_NAME"   # omit the name to use Brother_QL_1110NWB
 ```
 
-This copies the service to `~/Library/Application Support/UPSPrintBridge/`,
-installs a LaunchAgent (`com.ups-print-bridge`) that starts on login, and runs
-a smoke test. The script lives outside `~/Documents` on purpose — `launchd`
-cannot read TCC‑protected folders.
+Find your printer's CUPS queue name with `lpstat -p`. This copies the
+service to `~/Library/Application Support/UPSPrintBridge/`, installs a
+LaunchAgent (`com.ups-print-bridge`) that starts on login, and runs a smoke
+test. The script lives outside `~/Documents` on purpose — `launchd` cannot
+read TCC-protected folders.
 
-### 3. (Optional) Install the userscript
+### (Optional) Install the userscript
 
-Not required — the print flow works with just the service. Install it only if
-you want the floating **🖨️ Print to thermal printer** button on label pages:
+Not required — the print flow works with just the service. Install it only
+if you want the floating **🖨️ Print to thermal printer** button on label
+pages:
 
 1. Install **Tampermonkey** in Chrome.
 2. Tampermonkey → **Create a new script** → delete the template → paste the
@@ -140,50 +120,34 @@ you want the floating **🖨️ Print to thermal printer** button on label pages
 
 ## Usage
 
-Just click **Print Thermal Label** on ups.com — from a label page **or** from
-**Shipping History → "Get Labels"**. The service grabs the current label from
-ups.com and prints it on your thermal printer. No userscript needed.
+Click **Print Thermal Label** on ups.com — from a label page **or** from
+**Shipping History → "Get Labels"**. A small window flashes open
+("Rendering the label… → Opened in Preview -- print it from there.") and
+closes itself. Preview.app opens showing the rendered label. Print it from
+there with **⌘P**, the same as any other image.
 
-A small window flashes open ("Requesting the label from UPS… → Sent to the
-printer.") and closes itself. It always prints the label for the shipment you
-just chose, and never prints the same label twice in a row.
-
-> Format: the service advertises the printer as Zebra-class so UPS sends **ZPL**.
-> Change it with `UPS_BRIDGE_LABELTYPE` if your printer needs a different code
-> (e.g. `epl2`, `spl`) — see [`research/PROTOCOL.md`](research/PROTOCOL.md).
-
-### Optional: the userscript
-The Tampermonkey userscript isn't required. Install it only if you want the
-floating **🖨️ Print to thermal printer** button on label pages (handy for an
-extra copy). The main flow works without it.
-
-### If a particular shipment doesn't print
-The window will say *"No label received from UPS"* instead of printing the wrong
-label. Open that shipment's **label page** (`/uel/llp/...`) and try again.
-
-## How it was built (reverse-engineering)
-
-The `:4349` protocol was recovered by statically analysing the official app —
-see [`research/`](research/): [`PROTOCOL.md`](research/PROTOCOL.md) (the full
-protocol), [`REVERSE-ENGINEERING.md`](research/REVERSE-ENGINEERING.md) (method
-and conclusions), and `labelwindow_template.html` (the verbatim handshake page).
-TL;DR: the official macOS app is a 2018 Java/applet app that can't run on
-modern macOS, so re-implementing its protocol is the right approach.
+It always fetches the label for the shipment you just chose (never a stale
+one), and won't reopen the same label twice in a row from overlapping
+requests.
 
 ## Configuration
 
-The service reads these environment variables (set in the LaunchAgent plist,
-or re-run `./install.sh "Printer_Name"`):
+Environment variables, set in the LaunchAgent's plist (re-run `./install.sh
+"Printer_Name"` to regenerate it, or edit `~/Library/LaunchAgents/com.ups-print-bridge.plist` directly):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `UPS_BRIDGE_PRINTER` | `Bixolon_SRP770III` | CUPS queue name |
+| `UPS_BRIDGE_PRINTER` | `Brother_QL_1110NWB` | Printer name advertised to ups.com's handshake JS. Cosmetic only -- nothing here calls `lp`. |
 | `UPS_BRIDGE_PORT` | `4349` | Port to listen on |
 | `UPS_BRIDGE_HOST` | `127.0.0.1` | Interface |
-| `UPS_BRIDGE_RAW` | `0` | `1` → use `lp -o raw` |
+| `UPS_BRIDGE_LABEL_WIDTH_MM` | `103` | Label width passed to `labelize` |
+| `UPS_BRIDGE_LABEL_HEIGHT_MM` | `164` | Label height passed to `labelize` |
+| `UPS_BRIDGE_LABEL_DPMM` | `8` | Render density -- see "How it's different from upstream" above before changing this |
+| `UPS_BRIDGE_LABELIZE_BIN` | auto-detected | Path to the `labelize` binary |
 
-In the userscript, `DEBUG = true` logs `[UPS->Printer]` lines to the browser
-console.
+Adjust `LABEL_WIDTH_MM`/`LABEL_HEIGHT_MM` to match your actual label stock
+(check what your printer reports as loaded — e.g. a Brother DK-1241 label is
+103×164mm, not the generic "4×6" you might assume).
 
 ## Troubleshooting
 
@@ -201,18 +165,25 @@ launchctl kickstart -k gui/$(id -u)/com.ups-print-bridge
 # Live log (watch while you print)
 tail -f ~/Library/Logs/ups-print-bridge.log
 
-# The last ZPL actually sent to the printer (for inspection)
+# The last ZPL actually received from UPS (for inspection/re-rendering)
 cat ~/Library/Logs/ups-last-label.zpl
+
+# The last rendered label (persists after the Preview window is closed)
+open ~/Library/Logs/ups-last-label.png
 ```
 
-- **Window says "No label received from UPS"** → that shipment's label wasn't
-  delivered; open its label page (`/uel/llp/...`) and try again. Watch the log
-  for `handshake_loaded` / `label_received`.
-- **Blank label** → your CUPS queue is probably not *raw*; re-add it as Raw/Raw Queue.
-- **`Failed to fetch` the very first time** → Chrome's Private Network Access
-  warms up on the first request; just try again.
-- **(Userscript) floating button does nothing** → make sure Tampermonkey is
-  enabled on `ups.com`; open the console and look for `[UPS->Printer]`.
+- **Content only fills part of the label, rest is blank** → check
+  `UPS_BRIDGE_LABEL_DPMM` -- it almost certainly needs to be `8`, not your
+  printer's native resolution.
+- **Content is garbled or appears rotated near one edge** → the `^POI`
+  stripping should already handle this; if it's still happening, check
+  `~/Library/Logs/ups-last-label.zpl` for a `^PO` command this fork's regex
+  didn't catch, and open an issue with the specific ZPL.
+- **Window says "No label received from UPS"** → that shipment's label
+  wasn't delivered; open its label page (`/uel/llp/...`) and try again.
+  Watch the log for `handshake_loaded` / `label_received`.
+- **`Failed to fetch` the very first time** → Chrome's Private Network
+  Access warms up on the first request; just try again.
 
 ## Uninstall
 
@@ -220,24 +191,18 @@ cat ~/Library/Logs/ups-last-label.zpl
 ./uninstall.sh
 ```
 
-…and remove the userscript in Tampermonkey.
+…and remove the userscript in Tampermonkey if installed.
 
-## Tools (optional, for debugging)
+## Credit
 
-- [`tools/console-print.js`](tools/console-print.js) — paste in the DevTools
-  console on a label page to fetch + print the current label once (no
-  Tampermonkey needed).
-- [`tools/console-scan.js`](tools/console-scan.js) — shows whether the ZPL /
-  LabelRecovery endpoint is reachable from the current page.
-
-## Support
-
-This tool is free and open source. If it saved you time, you can leave a
-one-time tip via **[PayPal](https://paypal.me/dmerizco)** (or the **Sponsor**
-button at the top of the repo). Totally optional — thank you! 🙏
+The hard part -- reverse-engineering the `127.0.0.1:4349` handshake protocol
+that gets ups.com to hand over a shipment's real ZPL -- is
+[Mercatek](https://github.com/Mercatek)'s work, not this fork's. See
+[`research/`](research/) for the full protocol writeup. This fork only
+changes what happens after the ZPL bytes arrive.
 
 ## Disclaimer
 
 This is an unofficial, community tool. It does not modify UPS data; it only
-re-requests the label your account is already allowed to view and forwards it to
-your local printer. Trademarks belong to their owners.
+re-requests the label your account is already allowed to view. Trademarks
+belong to their owners.

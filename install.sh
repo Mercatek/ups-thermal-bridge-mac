@@ -14,16 +14,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LABEL="com.ups-print-bridge"
 APP_DIR="$HOME/Library/Application Support/UPSPrintBridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-PRINTER="${1:-${UPS_BRIDGE_PRINTER:-Bixolon_SRP770III}}"
+PRINTER="${1:-${UPS_BRIDGE_PRINTER:-Brother_QL_1110NWB}}"
+LABEL_WIDTH_MM="${UPS_BRIDGE_LABEL_WIDTH_MM:-103}"
+LABEL_HEIGHT_MM="${UPS_BRIDGE_LABEL_HEIGHT_MM:-164}"
+LABEL_DPMM="${UPS_BRIDGE_LABEL_DPMM:-8}"
 
-echo "==> UPS Print Bridge installer"
+echo "==> UPS Print Bridge installer (Brother/labelize fork)"
 
 # 1) Requirements
 if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 not found. Install the Xcode Command Line Tools:  xcode-select --install"
   exit 1
 fi
-echo "    python3: $(python3 --version)"
+echo "    python3:  $(python3 --version)"
+
+LABELIZE_BIN="$(command -v labelize || true)"
+if [ -z "$LABELIZE_BIN" ]; then
+  echo "ERROR: labelize not found. Install it first:"
+  echo "    brew tap GOODBOY008/homebrew-labelize && brew install labelize"
+  exit 1
+fi
+echo "    labelize: $LABELIZE_BIN ($($LABELIZE_BIN --version))"
 
 # 2) Check the CUPS printer exists
 if ! lpstat -p "$PRINTER" >/dev/null 2>&1; then
@@ -62,6 +73,16 @@ cat > "$PLIST" <<PLISTEOF
         <string>4349</string>
         <key>UPS_BRIDGE_HOST</key>
         <string>127.0.0.1</string>
+        <key>UPS_BRIDGE_LABELIZE_BIN</key>
+        <string>$LABELIZE_BIN</string>
+        <key>UPS_BRIDGE_LABEL_WIDTH_MM</key>
+        <string>$LABEL_WIDTH_MM</string>
+        <key>UPS_BRIDGE_LABEL_HEIGHT_MM</key>
+        <string>$LABEL_HEIGHT_MM</string>
+        <key>UPS_BRIDGE_LABEL_DPMM</key>
+        <string>$LABEL_DPMM</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
