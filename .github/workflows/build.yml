@@ -12,7 +12,7 @@ on:
 
 jobs:
   macos:
-    runs-on: macos-14   # Apple Silicon runner, ships Swift via Xcode
+    runs-on: macos-latest   # Apple Silicon runner, ships Swift via Xcode (pinned versions get retired)
     steps:
       - uses: actions/checkout@v4
 
