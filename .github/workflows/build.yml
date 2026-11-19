@@ -22,6 +22,29 @@ jobs:
       - name: Lint Python service
         run: python3 -m py_compile ups_print_bridge.py
 
+      - name: Security test Python service (fake lp, no printer)
+        run: |
+          printf '#!/bin/sh\nfor a; do f="$a"; done\ncat "$f" >> /tmp/printed.zpl\n' > /tmp/fake-lp
+          chmod +x /tmp/fake-lp; rm -f /tmp/printed.zpl
+          UPS_BRIDGE_PORT=4398 UPS_BRIDGE_LP=/tmp/fake-lp UPS_BRIDGE_LOG=/tmp/bridge.log python3 ups_print_bridge.py &
+          PID=$!; sleep 2
+          B=http://127.0.0.1:4398
+          code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          # arbitrary websites must be blocked
+          test "$(code -X POST $B/print -H 'Origin: https://evil.example' -H 'Content-Type: text/plain' --data '^XA^FDevil^XZ')" = 403
+          test "$(code -X POST $B/print -H 'Origin: https://ups.com.evil.com' --data 'labelBytes=XlhBXlha')" = 403
+          # GET with ZPL in the query (an <img> tag) must never print
+          curl -s "$B/listPrinters?x=%5EXA%5EFDevilget%5EXZ" >/dev/null
+          # ups.com, the local handshake page and local tools can print
+          test "$(code -X POST $B/print -H 'Origin: https://www.ups.com' -H 'Content-Type: application/json' --data '{"data":"^XA^FDups^XZ"}')" = 200
+          test "$(code -X POST $B/print -H 'Origin: http://127.0.0.1:4398' --data 'labelBytes=XlhBXkZEbG9jYWxeWFo=')" = 200
+          kill $PID
+          if grep -q evil /tmp/printed.zpl; then echo "blocked label was printed"; exit 1; fi
+          grep -q '\^FDups' /tmp/printed.zpl
+          grep -q '\^FDlocal' /tmp/printed.zpl
+          # label contents must not end up in the log (personal data)
+          if grep -q '\^FD' /tmp/bridge.log; then echo "label contents leaked to log"; exit 1; fi
+
       - name: Build engine (headless CLI)
         run: |
           cd macos-app

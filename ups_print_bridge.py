@@ -58,7 +58,8 @@ LOG_PATH = os.environ.get(
     "UPS_BRIDGE_LOG", os.path.expanduser("~/Library/Logs/ups-print-bridge.log")
 )
 
-LP_BIN = "/usr/bin/lp"
+# Overridable only so CI can test without a real printer (a fake `lp`).
+LP_BIN = os.environ.get("UPS_BRIDGE_LP", "/usr/bin/lp")
 
 # ZPL waiting to be printed: the userscript drops it here (POST /stage) and it
 # is printed when you click "Print Thermal Label" (UPS navigates to /listPrinters).
@@ -168,6 +169,21 @@ def extract_zpl(body_bytes, content_type):
     if _looks_like_zpl(body_bytes):
         return body_bytes
     return None
+
+
+def origin_allowed_for_print(origin):
+    """Only the local handshake page, ups.com, or local tools may print.
+
+    Mirrors the Swift app's gate. Browsers always send `Origin` on cross-site
+    POSTs, so any other website gets 403. Requests with no Origin come from
+    local tools (curl, Tampermonkey's GM_xmlhttpRequest).
+    """
+    if not origin or origin == "*":
+        return True
+    host = (urlparse(origin).hostname or "").lower()
+    if host in ("127.0.0.1", "localhost"):
+        return True
+    return host == "ups.com" or host.endswith(".ups.com")
 
 
 def send_to_printer(zpl_bytes):
@@ -375,8 +391,10 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n > 0 else b""
 
     def _log_request(self, body=b""):
-        log("REQ %s %s" % (self.command, self.path))
-        if body:
+        log("REQ %s %s" % (self.command, urlparse(self.path).path))
+        if body and not urlparse(self.path).path.lower().rstrip("/").endswith("probe"):
+            log("    body[%d bytes] (contents not logged: may contain personal data)" % len(body))
+        elif body:
             try:
                 log("    body[%d]: %s" % (len(body), body[:600].decode("utf-8", "replace")))
             except Exception:
@@ -399,14 +417,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        # ZPL passed in the query string?
-        zpl = _zpl_from_values([v for lst in query.values() for v in lst])
-        if zpl:
-            ok, detail = send_to_printer(zpl)
-            self._send_json({"status": "ok" if ok else "error", "success": ok,
-                             "printer": PRINTER, "bytes": len(zpl), "detail": detail},
-                            code=200 if ok else 500)
-            return
+        # NOTE: printing via GET (ZPL in the query string) was removed on purpose:
+        # a plain <img src=...> on any website could trigger it, and such requests
+        # carry no Origin header to check. All clients print via POST.
         if path.endswith("listprinters") or "printer" in path:
             if self._is_navigation():
                 # Always serve the native handshake page: ups.com posts the FRESH
@@ -448,6 +461,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         zpl = extract_zpl(body, self.headers.get("Content-Type", ""))
         if zpl:
+            origin = self.headers.get("Origin")
+            if not origin_allowed_for_print(origin):
+                log("    BLOCKED print from origin %s" % origin)
+                self._send_json({"status": "forbidden", "success": False,
+                                 "detail": "origin not allowed"}, code=403)
+                return
             ok, detail = send_to_printer(zpl)
             self._send_json({"status": "ok" if ok else "error", "success": ok,
                              "printer": PRINTER, "bytes": len(zpl), "detail": detail},
